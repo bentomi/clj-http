@@ -37,6 +37,7 @@
                                       PoolingHttpClientConnectionManager
                                       SystemDefaultRoutePlanner
                                       DefaultProxyRoutePlanner)
+           (org.apache.http.impl.nio.conn PoolingNHttpClientConnectionManager)
            (org.apache.http.impl.nio.client HttpAsyncClientBuilder
                                             HttpAsyncClients
                                             CloseableHttpAsyncClient)
@@ -261,10 +262,8 @@
           (finally
             (when (instance? CloseableHttpResponse response)
               (.close response))
-            (when-not (conn/reusable? conn-mgr)
-              (.shutdown conn-mgr))))))
-    (when-not (conn/reusable? conn-mgr)
-      (.shutdown conn-mgr))))
+            (conn/shutdown-regular-connection-manager conn-mgr)))))
+    (conn/shutdown-regular-connection-manager conn-mgr)))
 
 (defn- print-debug!
   "Print out debugging information to *out* for a given request."
@@ -387,8 +386,7 @@
          (try
            (build-response-map (.execute client http-req context) req conn-mgr context)
            (catch Throwable t
-             (when-not (conn/reusable? conn-mgr)
-               (.shutdown conn-mgr))
+             (conn/shutdown-regular-connection-manager conn-mgr)
              (throw t))))
        (let [^CloseableHttpAsyncClient client
              (http-async-client req conn-mgr http-url proxy-ignore-hosts)]
@@ -396,8 +394,7 @@
          (.execute client http-req context
                    (reify org.apache.http.concurrent.FutureCallback
                      (failed [this ex]
-                       (when-not (conn/reusable? conn-mgr)
-                         (.shutdown conn-mgr))
+                       (conn/shutdown-regular-connection-manager conn-mgr)
                        (if (:ignore-unknown-host? req)
                          ((:unknown-host-respond req) nil)
                          (raise ex)))
@@ -405,11 +402,9 @@
                        (try
                          (respond (build-response-map resp req conn-mgr context))
                          (catch Throwable t
-                           (when-not (conn/reusable? conn-mgr)
-                             (.shutdown conn-mgr))
+                           (conn/shutdown-regular-connection-manager conn-mgr)
                            (raise t))))
                      (cancelled [this]
                        (if-let [oncancel (:oncancel req)]
                          (oncancel))
-                       (when-not (conn/reusable? conn-mgr)
-                         (.shutdown conn-mgr))))))))))
+                       (conn/shutdown-regular-connection-manager conn-mgr)))))))))

@@ -206,6 +206,12 @@
   (or (instance? PoolingHttpClientConnectionManager conn-mgr)
       (instance? ReuseableAsyncConnectionManager conn-mgr)))
 
+(defn shutdown-regular-connection-manager [conn-mgr]
+  (when-not (reusable? conn-mgr)
+    (if (instance? PoolingNHttpClientConnectionManager conn-mgr)
+      (.shutdown conn-mgr 1)
+      (.shutdown conn-mgr))))
+
 (defn ^PoolingHttpClientConnectionManager make-reusable-conn-manager
   "Creates a default pooling connection manager with the specified options.
 

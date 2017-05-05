@@ -1,4 +1,4 @@
-(defproject clj-http "3.4.2-SNAPSHOT"
+(defproject clj-http "3.5.1-SNAPSHOT"
   :description "A Clojure HTTP library wrapping the Apache HttpComponents client."
   :url "https://github.com/dakrone/clj-http/"
   :license {:name "The MIT License"
@@ -19,14 +19,17 @@
                                   [cheshire "5.7.0"]
                                   [crouton "0.1.2"]
                                   [org.clojure/tools.reader "0.10.0"]
-                                  [com.cognitect/transit-clj "0.8.293"]
+                                  [com.cognitect/transit-clj "0.8.300"]
                                   [ring/ring-codec "1.0.1"]
                                   ;; other (testing) deps
                                   [org.clojure/clojure "1.8.0"]
                                   [org.clojure/tools.logging "0.3.1"]
                                   [log4j "1.2.17"]
                                   [ring/ring-jetty-adapter "1.5.1"]
-                                  [ring/ring-devel "1.5.1"]]}
+                                  [ring/ring-devel "1.5.1"]
+                                  ;; caching example deps
+                                  [org.clojure/core.cache "0.6.5"]
+                                  ]}
              :1.6 {:dependencies [[org.clojure/clojure "1.6.0"]]}
              :1.7 {:dependencies [[org.clojure/clojure "1.7.0"]]}}
   :aliases {"all" ["with-profile" "dev,1.6:dev,1.7:dev"]}

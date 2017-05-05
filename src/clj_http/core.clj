@@ -6,14 +6,15 @@
             [clj-http.util :refer [opt]]
             [clojure.pprint])
   (:import (java.io ByteArrayOutputStream FilterInputStream InputStream)
-           (java.net URI URL ProxySelector)
+           (java.net URI URL ProxySelector InetAddress)
            (java.util Locale)
            (org.apache.http HttpEntity HeaderIterator HttpHost HttpRequest
                             HttpEntityEnclosingRequest HttpResponse
                             HttpRequestInterceptor HttpResponseInterceptor)
            (org.apache.http.auth UsernamePasswordCredentials AuthScope
                                  NTCredentials)
-           (org.apache.http.client HttpRequestRetryHandler RedirectStrategy)
+           (org.apache.http.client HttpRequestRetryHandler RedirectStrategy
+                                   CredentialsProvider)
            (org.apache.http.client.config RequestConfig CookieSpecs)
            (org.apache.http.client.methods HttpDelete HttpGet HttpPost HttpPut
                                            HttpOptions HttpPatch
@@ -23,8 +24,7 @@
                                            HttpUriRequest HttpRequestBase)
            (org.apache.http.client.protocol HttpClientContext)
            (org.apache.http.config RegistryBuilder)
-           (org.apache.http.conn HttpClientConnectionManager)
-           (org.apache.http.conn.routing HttpRoute)
+           (org.apache.http.conn.routing HttpRoute HttpRoutePlanner)
            (org.apache.http.conn.ssl BrowserCompatHostnameVerifier
                                      SSLConnectionSocketFactory SSLContexts)
            (org.apache.http.conn.socket PlainConnectionSocketFactory)
@@ -33,9 +33,7 @@
                                         CloseableHttpClient HttpClients
                                         DefaultRedirectStrategy
                                         LaxRedirectStrategy HttpClientBuilder)
-           (org.apache.http.impl.conn BasicHttpClientConnectionManager
-                                      PoolingHttpClientConnectionManager
-                                      SystemDefaultRoutePlanner
+           (org.apache.http.impl.conn SystemDefaultRoutePlanner
                                       DefaultProxyRoutePlanner)
            (org.apache.http.impl.nio.client HttpAsyncClientBuilder
                                             HttpAsyncClients
@@ -62,17 +60,35 @@
                    (headers/assoc-join hs k v))
                  (headers/header-map)))))
 
+(def graceful-redirect-strategy
+  (reify RedirectStrategy
+    (getRedirect [this request response context]
+      (.getRedirect DefaultRedirectStrategy/INSTANCE request response context))
+
+    (isRedirected [this request response context]
+      (let [max-redirects (.getMaxRedirects (.getRequestConfig context))
+            num-redirects (count (.getRedirectLocations context))]
+        (if (<= max-redirects num-redirects)
+          false
+          (.isRedirected DefaultRedirectStrategy/INSTANCE request response context))))))
+
 (defn get-redirect-strategy [redirect-strategy]
   (case redirect-strategy
     :none (reify RedirectStrategy
             (getRedirect [this request response context] nil)
             (isRedirected [this request response context] false))
+
+    ;; Like default, but does not
+    :graceful graceful-redirect-strategy
+
     :default (DefaultRedirectStrategy/INSTANCE)
     :lax (LaxRedirectStrategy.)
     nil (DefaultRedirectStrategy/INSTANCE)
-    (DefaultRedirectStrategy/INSTANCE)))
 
-(defn add-retry-handler [^HttpClientBuilder builder handler]
+    ;; use directly as reifed RedirectStrategy
+    redirect-strategy))
+
+(defn ^HttpClientBuilder add-retry-handler [^HttpClientBuilder builder handler]
   (when handler
     (.setRetryHandler
      builder
@@ -93,7 +109,6 @@
 (defn request-config [{:keys [conn-timeout
                               socket-timeout
                               conn-request-timeout
-                              follow-redirects
                               max-redirects
                               allow-circular-redirects
                               allow-relative-redirects
@@ -103,8 +118,7 @@
                    (.setSocketTimeout (or socket-timeout -1))
                    (.setConnectionRequestTimeout
                     (or conn-request-timeout -1))
-                   (.setRedirectsEnabled ((complement false?)
-                                          follow-redirects))
+                   (.setRedirectsEnabled true)
                    (.setCircularRedirectsAllowed
                     (boolean allow-circular-redirects))
                    (.setRelativeRedirectsAllowed
@@ -113,17 +127,27 @@
     (when max-redirects (.setMaxRedirects config max-redirects))
     (.build config)))
 
-(defn get-route-planner
+(defmulti ^:private construct-http-host (fn [proxy-host proxy-port]
+                                          (class proxy-host)))
+(defmethod construct-http-host String
+  [^String proxy-host ^Long proxy-port]
+  (if proxy-port
+    (HttpHost. proxy-host proxy-port)
+    (HttpHost. proxy-host)))
+(defmethod construct-http-host java.net.InetAddress
+  [^InetAddress proxy-host ^Long proxy-port]
+  (if proxy-port
+    (HttpHost. proxy-host proxy-port)
+    (HttpHost. proxy-host)))
+
+(defn ^HttpRoutePlanner get-route-planner
   "Return an HttpRoutePlanner that either use the supplied proxy settings
   if any, or the JVM/system proxy settings otherwise"
-  [proxy-host proxy-port proxy-ignore-hosts http-url]
+  [^String proxy-host ^Long proxy-port proxy-ignore-hosts http-url]
   (let [url (URL. http-url)]
     (if (and (not (contains? (set proxy-ignore-hosts) (.getHost url)))
              proxy-host)
-      (let [proxy (if proxy-port
-                    (HttpHost. proxy-host proxy-port)
-                    (HttpHost. proxy-host))]
-        (DefaultProxyRoutePlanner. proxy))
+      (DefaultProxyRoutePlanner. (construct-http-host proxy-host proxy-port))
       (SystemDefaultRoutePlanner. (ProxySelector/getDefault)))))
 
 (defn http-client [{:keys [redirect-strategy retry-handler uri
@@ -239,11 +263,11 @@
       ((make-proxy-method-with-body request-method) http-url)
       (make-proxy-method request-method http-url))))
 
-(defn http-context [request-config]
+(defn ^HttpClientContext http-context [request-config]
   (doto (HttpClientContext/create)
     (.setRequestConfig request-config)))
 
-(defn credentials-provider []
+(defn ^CredentialsProvider credentials-provider []
   (BasicCredentialsProvider.))
 
 (defn- coerce-body-entity
@@ -262,9 +286,9 @@
             (when (instance? CloseableHttpResponse response)
               (.close response))
             (when-not (conn/reusable? conn-mgr)
-              (.shutdown conn-mgr))))))
+              (conn/shutdown-manager conn-mgr))))))
     (when-not (conn/reusable? conn-mgr)
-      (.shutdown conn-mgr))))
+      (conn/shutdown-manager conn-mgr))))
 
 (defn- print-debug!
   "Print out debugging information to *out* for a given request."
@@ -292,7 +316,7 @@
   (clojure.pprint/pprint (bean http-req)))
 
 (defn- build-response-map
-  [^HttpResponse response req conn-mgr context]
+  [^HttpResponse response req conn-mgr ^HttpClientContext context]
   (let [^HttpEntity entity (.getEntity response)
         status (.getStatusLine response)
         protocol-version (.getProtocolVersion status)]
@@ -323,7 +347,7 @@
   ([req] (request req nil nil))
   ([{:keys [body conn-timeout conn-request-timeout connection-manager
             cookie-store cookie-policy headers multipart query-string
-            redirect-strategy follow-redirects max-redirects retry-handler
+            redirect-strategy max-redirects retry-handler
             request-method scheme server-name server-port socket-timeout
             uri response-interceptor proxy-host proxy-port async?
             proxy-ignore-hosts proxy-user proxy-pass digest-auth ntlm-auth]
@@ -382,13 +406,14 @@
          (.addHeader http-req header-n (str header-v))))
      (when (opt req :debug) (print-debug! req http-req))
      (if-not async?
-       (let [^CloseableHttpClient client (http-client req conn-mgr http-url
-                                                      proxy-ignore-hosts)]
+       (let [^CloseableHttpClient
+             client (http-client req conn-mgr http-url proxy-ignore-hosts)]
          (try
-           (build-response-map (.execute client http-req context) req conn-mgr context)
+           (build-response-map (.execute client http-req context)
+                               req conn-mgr context)
            (catch Throwable t
              (when-not (conn/reusable? conn-mgr)
-               (.shutdown conn-mgr))
+               (conn/shutdown-manager conn-mgr))
              (throw t))))
        (let [^CloseableHttpAsyncClient client
              (http-async-client req conn-mgr http-url proxy-ignore-hosts)]
@@ -397,19 +422,20 @@
                    (reify org.apache.http.concurrent.FutureCallback
                      (failed [this ex]
                        (when-not (conn/reusable? conn-mgr)
-                         (.shutdown conn-mgr))
+                         (conn/shutdown-manager conn-mgr))
                        (if (:ignore-unknown-host? req)
                          ((:unknown-host-respond req) nil)
                          (raise ex)))
                      (completed [this resp]
                        (try
-                         (respond (build-response-map resp req conn-mgr context))
+                         (respond (build-response-map
+                                   resp req conn-mgr context))
                          (catch Throwable t
                            (when-not (conn/reusable? conn-mgr)
-                             (.shutdown conn-mgr))
+                             (conn/shutdown-manager conn-mgr))
                            (raise t))))
                      (cancelled [this]
                        (if-let [oncancel (:oncancel req)]
                          (oncancel))
                        (when-not (conn/reusable? conn-mgr)
-                         (.shutdown conn-mgr))))))))))
+                         (conn/shutdown-manager conn-mgr))))))))))

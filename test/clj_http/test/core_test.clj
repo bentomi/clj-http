@@ -289,9 +289,17 @@
                          {:max-redirects 2 :throw-exceptions false
                           :redirect-strategy :none
                           :allow-circular-redirects true})]
+    (is (= 302 (:status resp))))
+
+  (let [resp (client/get (localhost "/redirect")
+                         {:max-redirects 3
+                          :redirect-strategy :graceful
+                          :allow-circular-redirects true})]
     (is (= 302 (:status resp)))
-    #_(is (= (apply vector (repeat 3 "http://localhost:18080/redirect"))
-             (:trace-redirects resp))))
+    (is (= 3 (count (:trace-redirects resp))))
+    (is (=  ["http://localhost:18080/redirect" "http://localhost:18080/redirect" "http://localhost:18080/redirect"]
+            (:trace-redirects resp))))
+
   (is (thrown-with-msg? Exception #"Maximum redirects \(2\) exceeded"
                         (client/get (localhost "/redirect")
                                     {:max-redirects 2
@@ -569,16 +577,30 @@
   (client/request {:method :get :url (localhost "/get") :headers {"foo" 2}}))
 
 (deftest ^:integration t-empty-response-coercion
-   (run-server)
-   (let [resp (client/get (localhost "/empty") {:as :clojure})]
-     (is (= (:body resp) nil))))
+  (run-server)
+  (let [resp (client/get (localhost "/empty") {:as :clojure})]
+    (is (= (:body resp) nil))))
 
 (deftest ^:integration t-trace-redirects
   (run-server)
-  (let [resp-with-redirects (client/request {:method :get
-                                             :url (localhost "/redirect-to-get")})
-        resp-without-redirects (client/request {:method :get
-                                                :url (localhost "/redirect-to-get")
-                                                :follow-redirects false})]
-    (is (= (:trace-redirects resp-with-redirects) ["http://localhost:18080/get"]))
+  (let [resp-with-redirects
+        (client/request {:method :get
+                         :url (localhost "/redirect-to-get")})
+
+        resp-with-graceful-redirects
+        (client/request {:method :get
+                         :url (localhost "/redirect-to-get")
+                         :redirect-strategy :graceful})
+
+        resp-without-redirects
+        (client/request {:method :get
+                         :url (localhost "/redirect-to-get")
+                         :redirect-strategy :none})]
+
+    (is (= (:trace-redirects resp-with-redirects)
+           ["http://localhost:18080/get"]))
+
+    (is (= (:trace-redirects resp-with-graceful-redirects)
+           ["http://localhost:18080/get"]))
+
     (is (= (:trace-redirects resp-without-redirects) []))))

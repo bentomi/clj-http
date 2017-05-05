@@ -16,6 +16,7 @@
                                       PoolingHttpClientConnectionManager)
            (org.apache.http.impl.nio.conn PoolingNHttpClientConnectionManager)
            (javax.net.ssl SSLContext HostnameVerifier)
+           (org.apache.http.nio.conn NHttpClientConnectionManager)
            (org.apache.http.nio.conn.ssl SSLIOSessionStrategy)
            (org.apache.http.impl.nio.reactor
             IOReactorConfig
@@ -119,7 +120,10 @@
     (apply get-keystore* keystore args)))
 
 (defn get-keystore-context-verifier
-  [{:keys [keystore keystore-type keystore-pass keystore-instance
+  ;; TODO: use something else for passwords
+  ;; Note: JVM strings aren't ideal for passwords - see
+  ;; https://tinyurl.com/azm3ab9
+  [{:keys [keystore keystore-type ^String keystore-pass keystore-instance
            trust-store trust-store-type trust-store-pass]
     :as req}]
   (let [ks (get-keystore keystore keystore-type keystore-pass)
@@ -315,10 +319,15 @@
       (.setDefaultMaxPerRoute conn-man default-per-route))
     conn-man))
 
-(defn shutdown-manager
+(defmulti shutdown-manager
   "Shut down the given connection manager, if it is not nil"
-  [manager]
-  (and manager (.shutdown manager)))
+  class)
+(defmethod shutdown-manager nil [conn-mgr] nil)
+(defmethod shutdown-manager org.apache.http.conn.HttpClientConnectionManager
+  [^HttpClientConnectionManager  conn-mgr] (.shutdown conn-mgr))
+(defmethod shutdown-manager
+  org.apache.http.nio.conn.NHttpClientConnectionManager
+  [^NHttpClientConnectionManager conn-mgr] (.shutdown conn-mgr))
 
 (def ^:dynamic *connection-manager*
   "connection manager to be rebound during request execution"
